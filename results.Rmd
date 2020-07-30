@@ -265,6 +265,38 @@ dat %>%
   facet_wrap("year")
 ```
 
+```{r}
+# "Excess gaming" graph: Compare 2020 to previous 10 years
+tmp <- top_n(steam, 9, positive)
+tmp <- tmp %>% 
+  pivot_longer(
+    `2010-01-01`:`2020-04-12`, 
+    names_to = "date", 
+    values_to = "players"
+    )
+tmp <- tmp %>% 
+  mutate(
+    year = factor(year(date)), 
+    year2020 = factor(year(date) == 2020), 
+    yday = yday(date)
+  ) 
+tmp2 <- tmp %>% 
+  group_by(date) %>% 
+  summarise(players = mean(players, na.rm = TRUE)) %>% 
+  mutate(
+    title = ".Mean",
+    year = factor(year(date)), 
+    year2020 = factor(year(date) == 2020), 
+    yday = yday(date)
+  )
+tmp %>%   
+  ggplot(aes(yday, players, col = year2020, group = year)) +
+  geom_line() +
+  geom_line(data = tmp2) +
+  facet_wrap("title", scales = "free_y", ncol = 2)
+```
+
+
 ```{r, eval = FALSE}
 # Summaries of genres and features
 x <- select(steam, title, contains("genre"), contains("features")) %>% 
