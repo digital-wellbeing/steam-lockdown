@@ -1,0 +1,56 @@
+# Describe the data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(knitr)
+library(broom)
+library(tidyverse)
+library(lubridate)
+```
+
+Describe the dataset
+
+```{r}
+dat <- read_rds("data/players.rds")
+titles <- read_rds("data/titles.rds")
+dat <- left_join(titles, dat)
+total <- dat %>% 
+  group_by(Date) %>% 
+  summarise(Players = sum(Players, na.rm = TRUE))
+```
+
+## Features
+
+Numbers of features
+
+```{r}
+titles %>% count(`Loot Boxes` = LB)
+titles %>% count(Multiplayer = MP)
+titles %>% count(COOP)
+titles %>% count(MP, LB)
+titles %>% 
+  count(Multiplayer = MP, COOP, `Loot Boxes` = LB) %>% 
+  arrange(n) %>% 
+  mutate(p = scales::percent(n / sum(n), accuracy = 1))
+```
+
+## Titles
+
+How many titles are there per day
+
+```{r}
+dat %>% 
+  group_by(Date) %>% 
+  summarise(titles = length(unique(appid))) %>% 
+  ggplot(aes(Date, titles)) +
+  geom_point()
+```
+
+## Total volume
+
+```{r}
+total %>% 
+  ggplot(aes(Date, Players)) +
+  geom_line()
+```
+

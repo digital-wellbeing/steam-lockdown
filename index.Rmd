@@ -1,5 +1,16 @@
+--- 
+title: "Gaming under lockdown: Steam data"
+author: "Matti Vuorre"
+date: "`r Sys.Date()`"
+site: bookdown::bookdown_site
+documentclass: book
+bibliography: []
+biblio-style: apalike
+link-citations: yes
+description: ""
+---
 
-# Gaming during Lockdown
+# Preface
 
 We study changes in gaming behavior during COVID-19 using data from Steam.
 
@@ -16,3 +27,16 @@ The project is organized as a R [bookdown](https://bookdown.org/yihui/bookdown/)
 ## Raw data
 
 Is in data-raw/ which can't yet be pushed online.
+
+## Reproducibility
+
+```{r, include = FALSE}
+# Ensure that .nojekyll exists for github pages
+dir.create('docs', F); file.create('docs/.nojekyll')
+```
+
+```{r}
+options(width = 120)
+library(sessioninfo)
+session_info()
+```

@@ -1,0 +1,877 @@
+# GAM
+
+```{r setup, include=FALSE}
+# Packages
+library(knitr)
+library(scales)
+library(mgcv)
+library(tidyverse)
+library(lubridate)
+library(brms)
+library(tidybayes)
+library(patchwork)
+```
+
+```{r options}
+# Plotting options
+theme_set(
+  theme_linedraw() + theme(panel.grid = element_blank())
+)
+# Modelling options (cores, directory to save model files)
+ncores <- parallel::detectCores(logical = FALSE)
+options(mc.cores = ncores, loo.cores = ncores)
+dir.create("models", FALSE)
+# knitr options
+opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+GAM
+
+```{r}
+dat <- left_join(
+  read_rds("data/titles.rds"), 
+  read_rds("data/players.rds")
+)
+
+# Add useful time indicators
+cd <- as.Date("2020-03-11")
+dat <- dat %>% 
+  mutate(
+    year = factor(year(Date)),
+    ymonth = month(Date, label = FALSE) - 1,
+    yweek = week(Date) - 1,
+    yday = yday(Date) - 1,
+    wday = wday(Date, week_start = 1, label = FALSE) - 1, 
+    wend = factor(as.numeric(wday %in% c(5, 6)), labels = c("No", "Yes"))
+  )
+# Limit both years to last yday in 2020
+dat <- dat %>% filter(yday <= max(yday[year==2020]))
+group_by(dat, year) %>% 
+  summarise(max(Date))
+```
+
+## Model totals
+
+```{r}
+total <- dat %>% 
+  group_by(across(c(Date, year:wend))) %>% 
+  summarise(
+    Players = sum(Players, na.rm = TRUE), 
+    ngames = length(unique(appid))
+  ) %>% 
+  ungroup()
+years <- total %>% 
+  group_by(year) %>% 
+  nest()
+```
+
+### mgcv
+
+```{r mgcv-years, cache = TRUE}
+years <- years %>% 
+  mutate(
+    m0 = map(data, ~gamm(
+      Players ~ t2(yday, k = 27) + t2(wday, k = 7),
+      data = .x,
+      method = "REML"
+    )),
+    m1 = map(data, ~gamm(
+      Players ~ t2(yday, wday, k = c(27, 7)),
+      data = .x,
+      method = "REML"
+    ))
+  )
+anova(
+  years$m0[[2]][["lme"]], 
+  years$m1[[2]][["lme"]]
+)
+summary(years$m1[[2]][["gam"]])
+acf(residuals(years$m1[[2]][["gam"]]))
+gam.check(years$m1[[2]][["gam"]])
+vis.gam(years$m1[[1]][["gam"]], theta = 30, phi = 10)
+```
+
+Figure
+
+```{r}
+# Prediction dataframe
+tmp <- years %>% 
+  mutate(
+    preds = map(m1, ~as.data.frame(predict(.x[["gam"]], se.fit = TRUE)))
+    ) %>% 
+  unnest(c(data, preds)) %>% 
+  mutate(year = factor(year)) %>% 
+  # Make dates same for 2019 and 2020 to put on same plot
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup()
+# Excess players dataframe
+tmp2 <- tmp %>% 
+  select(year, yweek, Players, fit) %>% 
+  pivot_wider(
+    names_from = year, values_from = c(Players, fit), values_fn = mean
+  ) %>% 
+  mutate(excess_empirical = Players_2020 - Players_2019) %>% 
+  mutate(excess_model = fit_2020 - fit_2019) %>% 
+  mutate(year = "2020") %>% 
+  select(year, yweek, starts_with("excess"))
+  # left_join(select(tmp, year, Date, yweek))
+# Predictions and data figure
+p1 <- tmp %>%
+  ggplot(aes(Date, Players, alpha = year, group = year)) +
+  # scale_x_date() +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_ribbon(
+    aes(ymin = fit-se.fit*2, ymax = fit+se.fit*2), alpha=.1
+  ) +
+  geom_line(aes(y=fit), size = .2) +
+  geom_point(shape = 1, size = 1, fill = "white")
+p1
+# Excess gaming figure  
+p2 <- tmp2 %>% 
+  ggplot(aes(x = yweek, alpha = NA)) +
+  # Week of WHO announcement
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  geom_line(aes(y = excess_model), size = .2) +
+  geom_point(
+    aes(y = excess_empirical), 
+    shape = 1, size = 1, fill = "white"
+  ) +
+  geom_hline(yintercept = 0, lty = 2, size = .1) +
+  scale_y_continuous(
+    "Excess players\n(2020 - 2019)",
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  )
+p2
+(p1 + theme(axis.title.x = element_blank())) / p2 + 
+  plot_layout(heights = c(.75, .25), guides = "collect")
+ggsave("Figure1-mgcv.png", width = 8, height = 5)
+```
+
+Weekend effect figure
+
+```{r}
+years %>%
+  mutate(preds = map(m1, ~as.data.frame(predict(.x[["gam"]], se.fit = TRUE)))) %>%
+  unnest(c(data, preds)) %>%
+  group_by(year, yweek) %>%
+  summarise(
+    w_eff = mean(Players[wday %in% 5:6]) - mean(Players[wday %in% 0:4]),
+    fit = mean(fit[wday %in% 5:6]) - mean(fit[wday %in% 0:4]),
+  ) %>%
+  mutate(year = factor(year)) %>% 
+  ggplot(aes(yweek, w_eff, alpha = year, group = year)) +
+  scale_x_continuous(
+    "Week number",
+    breaks = pretty_breaks()
+  ) +
+    scale_y_continuous(
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  geom_line(aes(y=fit)) +
+  geom_point()
+
+# show it for weeks 5, 15, and 25
+years %>%
+  mutate(preds = map(m1, ~as.data.frame(predict(.x[["gam"]], se.fit = TRUE)))) %>%
+  unnest(c(data, preds)) %>%
+  filter(yweek %in% c(5, 15, 25)) %>% 
+  # group_by(year, yweek, yday) %>%
+  mutate(year = factor(year)) %>% 
+  ggplot(aes(wday, Players)) +
+  geom_point() +
+  geom_line(aes(y = fit)) +
+  facet_grid(year~yweek)
+```
+
+### brms
+
+```{r, results = 'hide'}
+sampler_0 <- brm(
+  Players ~ t2(yday, k = 27) + t2(wday, k = 7),
+  # prior = prior(normal(4.5e6, 5e5), class = "Intercept"),
+  data = filter(total, year==2020),
+  chains = 0,
+  file = "models/brm-sampler-0"
+)
+sampler_1 <- brm(
+  Players ~ t2(yday, wday, k = c(27, 7)),
+  # prior = prior(normal(4.5e6, 1e5), class = "Intercept"),
+  data = filter(total, year==2020),
+  chains = 0,
+  file = "models/brm-sampler-1"
+)
+sampler_2 <- brm(
+  Players ~ t2(yday, wday, k = c(27, 7)) + ar(time = yday, p = 1),
+  # prior = prior(normal(4.5e6, 1e5), class = "Intercept"),
+  data = filter(total, year==2020),
+  chains = 0,
+  file = "models/brm-sampler-2"
+)
+# This model has a hard time converging so we set inits for the intercept
+years <- years %>% 
+  mutate(
+    bm0 = map2(data, year, ~update(
+      sampler_0,
+      newdata = .x,
+      chains = 4,
+      iter = 4000,
+      inits = function() {list(Intercept = 4.5e6)},
+      control = list(adapt_delta = .99),
+      file = str_glue("models/brm-{.y}-m0")
+    )),
+    bm1 = map2(data, year, ~update(
+      sampler_1,
+      newdata = .x,
+      chains = 4,
+      iter = 4000,
+      inits = function() {list(Intercept = 4.5e6)},
+      control = list(adapt_delta = .99),
+      file = str_glue("models/brm-{.y}-m1")
+    )),
+    bm2 = map2(data, year, ~update(
+      sampler_2,
+      newdata = .x,
+      chains = 4,
+      iter = 4000,
+      inits = function() {list(Intercept = 4.5e6)},
+      control = list(adapt_delta = .99),
+      file = str_glue("models/brm-{.y}-m2")
+    ))
+  )
+```
+
+```{r}
+map(years$bm0, summary)
+gam.vcomp(years$m0[[2]][["gam"]], rescale = FALSE) # Compare
+map(years$bm1, summary)
+map(years$bm2, summary)
+gam.vcomp(years$m1[[2]][["gam"]], rescale = FALSE) # Compare
+cbind(years$bm1[[2]][["data"]], fitted(years$bm1[[2]])) %>% 
+  ggplot(aes(yday, Players)) + 
+  geom_point() + 
+  geom_line(aes(y = Estimate))
+acf(residuals(years$bm1[[2]])[,1])
+summary(years$bm1[[2]])
+bayes_R2(years$bm1[[2]])
+```
+
+```{r}
+# Compare mgcv and brms
+years %>% 
+  mutate(
+    pred_b = map(bm1, ~as.data.frame(fitted(.))), 
+    pred_m = map(m1, ~fitted(.[["gam"]]))
+  ) %>% 
+  select(year, data, starts_with("pred")) %>% 
+  unnest(c(data, pred_m, pred_b)) %>% 
+  pivot_longer(c(Estimate, pred_m)) %>% 
+  ggplot(aes(Date, Players)) +
+  geom_point() +
+  geom_line(aes(y = value, col = name)) +
+  facet_wrap("year", scales = "free", nrow = 2)
+```
+
+#### Figure
+
+```{r}
+# Prediction dataframe
+tmp <- years %>% 
+  mutate(
+    p = map2(data, bm1, ~add_fitted_draws(.x, .y))
+  ) %>% 
+  select(year, p) %>% 
+  unnest(p)
+
+# Data with same dates for years for visualizing
+xtmp <- total %>% 
+  mutate(year = factor(year)) %>% 
+  # Make dates same for 2019 and 2020 to put on same plot
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup()
+
+# Predictions and data figure
+p1 <- tmp %>%
+  mutate(year = factor(year)) %>% 
+  # Make dates same for 2019 and 2020 to put on same plot
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup() %>% 
+  group_by(year, Date) %>% 
+  mean_qi(.value) %>% 
+  ungroup() %>% 
+  ggplot(aes(Date, .value, alpha = year, group = year)) +
+  # scale_x_date() +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(
+    "Players",
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_ribbon(
+    aes(ymin = .lower, ymax = .upper), alpha=.1
+  ) +
+  geom_line(size = .2) +
+  geom_point(
+    data = xtmp, 
+    aes(y=Players), shape = 1, size = 1, fill = "white"
+    )
+p1
+
+# Excess players dataframe
+tmp2 <- tmp %>% 
+  group_by(year, yweek, .draw) %>% 
+  summarise(week_mean = mean(.value)) %>% 
+  mutate(.draw = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_wider(
+    names_from = year, values_from = c(week_mean)
+  ) %>% 
+  mutate(excess_model = `2020` / `2019`) %>% 
+  mutate(year = "2020") %>% 
+  select(year, yweek, starts_with("excess"))
+tmp3 <- xtmp %>% 
+  group_by(year, yweek) %>% 
+  summarise(week_mean = mean(Players)) %>% 
+  pivot_wider(
+    names_from = year, values_from = c(week_mean)
+  ) %>% 
+  mutate(excess_data = `2020` / `2019`) %>% 
+  mutate(year = "2020") %>% 
+  select(year, yweek, starts_with("excess"))
+  # left_join(select(tmp, year, Date, yweek))
+# Excess gaming figure  
+p2 <- tmp2 %>% 
+  group_by(year, yweek) %>% 
+  mean_qi(excess_model) %>% 
+  ggplot(aes(x = yweek, alpha = NA)) +
+  # Week of WHO announcement
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = .2) +
+  geom_line(aes(y = excess_model), size = .2) +
+  geom_point(
+    data = tmp3,
+    aes(y = excess_data),
+    shape = 1, size = 1, fill = "white"
+  ) +
+  # geom_hline(yintercept = 0, lty = 2, size = .1) +
+  scale_y_continuous(
+    "Excess players in 2020",
+    breaks = pretty_breaks(),
+    labels = scales::percent
+  )
+p2
+(p1 + theme(axis.title.x = element_blank())) / p2 + 
+  plot_layout(heights = c(.75, .25), guides = "collect")
+ggsave("Figure1-brms.png", width = 8, height = 5)
+```
+
+#### Weekend effect
+
+```{r}
+tmp <- years %>% 
+  mutate(data2 = map(data, ~filter(., yweek %in% c(5, 15, 25)))) %>% 
+  mutate(p = map2(data2, bm1, ~add_fitted_draws(.x, .y))) %>% 
+  select(year, p) %>% 
+  unnest(p) %>% 
+  mutate(year = factor(year)) %>% 
+  mutate(yweek = fct_inorder(str_glue("Week {yweek}")))
+p1 <- tmp %>% 
+  mutate(wday = wday(Date, label = TRUE, week_start = 1)) %>% 
+  group_by(year, yweek, wday, Players) %>% 
+  mean_qi(.value) %>% 
+  ggplot(aes(wday, alpha = year, group = year)) +
+  scale_y_continuous(
+    "Players",
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  geom_point(aes(y = Players), shape = 1, size = 1, fill = "white") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = .1) +
+  geom_line(aes(y = .value)) +
+  facet_grid(~yweek)
+weffs_data <- total %>% 
+  select(year, yweek, wday, Players) %>% 
+  pivot_wider(names_from = wday, values_from = Players) %>% 
+  mutate(
+    Weekend_effect = rowMeans(select(., `5`, `6`)) / 
+      rowMeans(select(., `0`, `1`, `2`, `3`, `4`)), 
+  ) %>% 
+  mutate(year = factor(year))
+weffs <- years %>% 
+  mutate(p = map2(data, bm1, ~add_fitted_draws(.x, .y))) %>% 
+  select(year, p) %>% 
+  unnest(p) %>% 
+  select(year, yweek, wday, .draw, .value) %>% 
+  pivot_wider(names_from = wday, values_from = c(.value)) %>% 
+  ungroup() %>% 
+  mutate(
+    Weekend_effect = rowMeans(select(., `5`, `6`)) / 
+      rowMeans(select(., `0`, `1`, `2`, `3`, `4`)), 
+  )
+
+p2 <- weffs %>% 
+  mutate(year = factor(year)) %>% 
+  group_by(year, yweek) %>% 
+  mean_qi(Weekend_effect) %>% 
+  ggplot(aes(yweek, Weekend_effect, alpha = year, group = year)) +
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  scale_y_continuous(
+    "Weekend effect",
+    breaks = pretty_breaks(), 
+    labels = scales::percent
+  ) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  geom_line(size = .5) +
+  geom_ribbon(
+    aes(ymin = .lower, ymax = .upper), alpha = .1
+  ) +
+  geom_point(data = weffs_data, shape = 1) +
+  theme(legend.position = "none")
+
+# Excess weekend effect dataframe
+weffs2 <- weffs %>% 
+  select(year, yweek, .draw, Weekend_effect) %>% 
+  pivot_wider(
+    names_from = year, values_from = c(Weekend_effect)
+  ) %>% 
+  mutate(Difference = `2020` - `2019`) %>% 
+  mutate(year = "2020") %>% 
+  select(year, yweek, .draw, Difference)
+p3 <- weffs2 %>% 
+  group_by(year, yweek) %>% 
+  mean_qi(Difference) %>% 
+  ggplot(aes(yweek, Difference)) +
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  scale_y_continuous(
+    "Difference\n(2020 - 2019)",
+    breaks = pretty_breaks(), labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_hline(lty = 2, yintercept = 0, size = .2) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = .2) +
+  geom_line() +
+  theme(legend.position = "none")
+((p1 + theme(axis.title.x = element_blank())) / p2) + 
+  plot_layout(heights = c(.4, .6), guides = "collect")
+ggsave("Figure2-brms.png", width = 8, height = 5)
+```
+
+## Multiplayer
+
+```{r}
+mp <- dat %>% 
+  mutate(year = factor(year)) %>% 
+  group_by(across(c(MP, Date, year:wend))) %>% 
+  summarise(
+    Players = sum(Players, na.rm = TRUE), 
+    ngames = length(unique(appid))
+  ) %>% 
+  ungroup() %>% 
+  group_by(MP, year) %>% 
+  nest()
+mp
+```
+
+```{r}
+mp %>% 
+  unnest(data) %>% 
+  # Make dates same across years for viz
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup() %>% 
+  ggplot(aes(Date, Players, alpha = year, group = year)) +
+  # scale_x_date() +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_line(size = .3) +
+  geom_point(shape = 21, size = 1, fill = "white") +
+  facet_grid(rows = "MP", scales = "free")
+```
+
+### mgcv
+
+```{r mgcv-multiplayer, cache = TRUE}
+mp <- mp %>% 
+  mutate(
+    m0 = map(data, ~gamm(
+      Players ~ t2(yday, k = 27) + t2(wday, k = 7),
+      data = .x,
+      method = "REML"
+    )),
+    m1 = map(data, ~gamm(
+      Players ~ t2(yday, wday, k = c(27, 7)),
+      data = .x,
+      method = "REML"
+    ))
+  )
+```
+
+Figure
+
+```{r}
+# Prediction dataframe
+tmp <- mp %>% 
+  ungroup() %>% 
+  mutate(MP = factor(MP, labels = c("Single-player", "Multiplayer"))) %>% 
+  mutate(
+    preds = map(m1, ~as.data.frame(predict(.x[["gam"]], se.fit = TRUE)))
+    ) %>% 
+  unnest(c(data, preds)) %>% 
+  mutate(year = factor(year)) %>% 
+  # Make dates same for 2019 and 2020 to put on same plot
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup()
+# Excess players dataframe
+tmp2 <- tmp %>% 
+  select(MP, year, yweek, Players, fit) %>% 
+  pivot_wider(
+    names_from = year, values_from = c(Players, fit), values_fn = mean
+  ) %>% 
+  mutate(excess_empirical = Players_2020 - Players_2019) %>% 
+  mutate(excess_model = fit_2020 - fit_2019) %>% 
+  mutate(year = "2020") %>% 
+  select(MP, year, yweek, starts_with("excess"))
+# Predictions and data figure
+p1 <- tmp %>%
+  ggplot(aes(Date, Players, alpha = year, group = year)) +
+  # scale_x_date() +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_ribbon(
+    aes(ymin = fit-se.fit*2, ymax = fit+se.fit*2), alpha=.1
+  ) +
+  geom_line(aes(y=fit), size = .2) +
+  geom_point(shape = 1, size = 1, fill = "white") +
+  facet_wrap("MP", nrow = 1, scales = "free")
+p1
+# Excess gaming figure  
+p2 <- tmp2 %>% 
+  ggplot(aes(x = yweek, alpha = NA)) +
+  # Week of WHO announcement
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  geom_line(aes(y = excess_model), size = .2) +
+  geom_point(
+    aes(y = excess_empirical), 
+    shape = 1, size = 1, fill = "white"
+  ) +
+  geom_hline(yintercept = 0, lty = 2, size = .1) +
+  scale_y_continuous(
+    "Excess players\n(2020 - 2019)",
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  facet_wrap("MP", nrow = 1, scales = "free")
+p2
+(p1 + theme(axis.title.x = element_blank())) / p2 + 
+  plot_layout(heights = c(.75, .25), guides = "collect")
+ggsave("Figure1-mp-mgcv.png", width = 8, height = 5)
+```
+
+Weekend effect figure
+
+```{r}
+mp %>%
+  mutate(preds = map(m1, ~as.data.frame(predict(.x[["gam"]], se.fit = TRUE)))) %>%
+  unnest(c(data, preds)) %>%
+  group_by(MP, year, yweek) %>%
+  summarise(
+    w_eff = mean(Players[wday %in% 5:6]) - mean(Players[wday %in% 0:4]),
+    fit = mean(fit[wday %in% 5:6]) - mean(fit[wday %in% 0:4]),
+  ) %>%
+  mutate(year = factor(year)) %>% 
+  ggplot(aes(yweek, w_eff, alpha = year, group = year)) +
+  scale_x_continuous(
+    "Week number",
+    breaks = pretty_breaks()
+  ) +
+    scale_y_continuous(
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  geom_line(aes(y=fit)) +
+  geom_point() +
+  facet_wrap("MP", nrow = 1, scales = "free")
+```
+
+### brms
+
+```{r, results = 'hide'}
+sampler_0 <- brm(
+  Players ~ t2(yday, k = 27) + t2(wday, k = 7),
+  data = mp$data[[1]],
+  chains = 0,
+  file = "models/brm-sampler-mp-0"
+)
+sampler_1 <- brm(
+  Players ~ t2(yday, wday, k = c(27, 7)),
+  data = mp$data[[1]],
+  chains = 0,
+  file = "models/brm-sampler-mp-1"
+)
+# This model has a hard time converging so we set inits for the intercept
+mp$bm0 <- vector("list", 4)
+mp$bm1 <- vector("list", 4)
+for (i in 1:4) {
+  this_data <- mp$data[[i]]
+    mp$bm0[[i]] <- update(
+    sampler_0,
+    newdata = this_data,
+    chains = 4,
+    iter = 3000,
+    inits = function() {list(Intercept = mean(this_data$Players))},
+    control = list(adapt_delta = .99),
+    file = str_glue("models/brm-mp-{i}-m0")
+    )
+  mp$bm1[[i]] <- update(
+    sampler_1,
+    newdata = this_data,
+    chains = 4,
+    iter = 3000,
+    inits = function() {list(Intercept = mean(this_data$Players))},
+    control = list(adapt_delta = .99),
+    file = str_glue("models/brm-mp-{i}-m1")
+    )
+}
+```
+
+```{r}
+# Did the inits work?
+for (i in 1:4) {
+  print(mean(mp$data[[i]][["Players"]]))
+  print(mp$bm1[[i]][["fit"]]@inits[[1]][["Intercept"]])
+}
+```
+
+#### Figure
+
+```{r}
+# Prediction dataframe
+mp <- mp %>% 
+  ungroup() %>% 
+  mutate(MP = factor(MP, labels = c("Single-player", "Multiplayer")))
+tmp <- mp %>% 
+  mutate(
+    p = map2(data, bm1, ~add_fitted_draws(.x, .y))
+  ) %>% 
+  select(MP, year, p) %>% 
+  unnest(p)
+
+# Data with same dates for years for visualizing
+xtmp <- mp %>% 
+  select(MP, year, data) %>% 
+  unnest(data) %>% 
+  mutate(year = factor(year)) %>% 
+  # Make dates same for 2019 and 2020 to put on same plot
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup()
+
+# Predictions and data figure
+p1 <- tmp %>%
+  mutate(year = factor(year)) %>% 
+  # Make dates same for 2019 and 2020 to put on same plot
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ungroup() %>% 
+  group_by(MP, year, Date) %>% 
+  mean_qi(.value) %>% 
+  ungroup() %>% 
+  ggplot(aes(Date, .value, alpha = year, group = year)) +
+  # scale_x_date() +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(
+    "Players",
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_ribbon(
+    aes(ymin = .lower, ymax = .upper), alpha=.1
+  ) +
+  geom_line(size = .2) +
+  geom_point(
+    data = xtmp, 
+    aes(y=Players), shape = 1, size = 1, fill = "white"
+  ) +
+  facet_wrap("MP", nrow = 1, scales = "free")
+
+# Excess players dataframe
+tmp2 <- tmp %>% 
+  group_by(MP, year, yweek, .draw) %>% 
+  summarise(week_mean = mean(.value)) %>% 
+  mutate(.draw = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_wider(
+    names_from = year, values_from = c(week_mean)
+  ) %>% 
+  mutate(excess_model = `2020` / `2019`) %>% 
+  mutate(year = "2020") %>% 
+  select(MP, year, yweek, starts_with("excess"))
+tmp3 <- xtmp %>% 
+  group_by(MP, year, yweek) %>% 
+  summarise(week_mean = mean(Players)) %>% 
+  pivot_wider(
+    names_from = year, values_from = c(week_mean)
+  ) %>% 
+  mutate(excess_data = `2020` / `2019`) %>% 
+  mutate(year = "2020") %>% 
+  select(MP, year, yweek, starts_with("excess"))
+  # left_join(select(tmp, year, Date, yweek))
+# Excess gaming figure  
+p2 <- tmp2 %>% 
+  group_by(MP, year, yweek) %>% 
+  mean_qi(excess_model) %>% 
+  ggplot(aes(x = yweek, alpha = NA)) +
+  # Week of WHO announcement
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = .2) +
+  geom_line(aes(y = excess_model), size = .2) +
+  geom_point(
+    data = tmp3,
+    aes(y = excess_data),
+    shape = 1, size = 1, fill = "white"
+  ) +
+  geom_hline(yintercept = 1, lty = 2, size = .1) +
+  scale_y_continuous(
+    "2020 excess",
+    breaks = pretty_breaks(), 
+    labels = scales::percent
+  ) +
+  facet_wrap("MP", nrow = 1, scales = "free") +
+  theme(strip.background = element_blank())
+
+(p1 + theme(axis.title.x = element_blank())) / p2 + 
+  plot_layout(heights = c(.75, .25), guides = "collect") &
+  theme(legend.position = "none")
+ggsave("Figure1-mp-brms.png", width = 8, height = 5)
+```
+
+#### Weekend effect
+
+```{r}
+tmp <- mp %>% 
+  mutate(data2 = map(data, ~filter(., yweek %in% c(5, 15, 25)))) %>% 
+  mutate(p = map2(data2, bm1, ~add_fitted_draws(.x, .y))) %>% 
+  select(MP, year, p) %>% 
+  unnest(p) %>% 
+  mutate(year = factor(year)) %>% 
+  mutate(yweek = fct_inorder(str_glue("Week {yweek}")))
+p1 <- tmp %>% 
+  mutate(wday = wday(Date, label = TRUE, week_start = 1)) %>% 
+  group_by(MP, year, yweek, wday, Players) %>% 
+  mean_qi(.value) %>% 
+  ggplot(aes(wday, alpha = year, group = year)) +
+  scale_y_continuous(
+    "Players",
+    breaks = pretty_breaks(), 
+    labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  geom_point(aes(y = Players), shape = 1, size = 1, fill = "white") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = .1) +
+  geom_line(aes(y = .value)) +
+  facet_grid(MP~yweek, scales = "free")
+p1
+weffs_data <- mp %>% 
+  select(MP, year, data) %>% 
+  unnest(data) %>% 
+  select(MP, year, yweek, wday, Players) %>% 
+  pivot_wider(names_from = wday, values_from = Players) %>% 
+  mutate(
+    Weekend_effect = rowMeans(select(., `5`, `6`)) / 
+      rowMeans(select(., `0`, `1`, `2`, `3`, `4`)), 
+  ) %>% 
+  mutate(year = factor(year))
+weffs <- mp %>% 
+  mutate(p = map2(data, bm1, ~add_fitted_draws(.x, .y))) %>% 
+  select(MP, year, p) %>% 
+  unnest(p) %>% 
+  select(MP, year, yweek, wday, .draw, .value) %>% 
+  pivot_wider(names_from = wday, values_from = c(.value)) %>% 
+  ungroup() %>% 
+  mutate(
+    Weekend_effect = rowMeans(select(., `5`, `6`)) / 
+      rowMeans(select(., `0`, `1`, `2`, `3`, `4`)), 
+  )
+
+p2 <- weffs %>% 
+  mutate(year = factor(year)) %>% 
+  group_by(MP, year, yweek) %>% 
+  mean_qi(Weekend_effect) %>% 
+  ggplot(aes(yweek, Weekend_effect, alpha = year, group = year)) +
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  scale_y_continuous(
+    "Weekend effect",
+    breaks = pretty_breaks(), labels = percent_format(accuracy = 1)
+  ) +
+  scale_alpha_manual("Year", values = c(.3, 1)) +
+  geom_line(size = .5) +
+  geom_ribbon(
+    aes(ymin = .lower, ymax = .upper), alpha = .1
+  ) +
+  geom_point(data = weffs_data, shape = 1) +
+  theme(legend.position = "none") +
+  facet_grid(rows = "MP", scales = "free")
+
+# Excess weekend effect dataframe
+weffs2 <- weffs %>% 
+  select(MP, year, yweek, .draw, Weekend_effect) %>% 
+  pivot_wider(
+    names_from = year, values_from = c(Weekend_effect)
+  ) %>% 
+  mutate(Difference = `2020` - `2019`) %>% 
+  mutate(year = "2020") %>% 
+  select(MP, year, yweek, .draw, Difference)
+p3 <- weffs2 %>% 
+  group_by(MP, year, yweek) %>% 
+  mean_qi(Difference) %>% 
+  ggplot(aes(yweek, Difference)) +
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  scale_x_continuous("Week of year", breaks = pretty_breaks()) +
+  scale_y_continuous(
+    "Difference\n(2020 - 2019)",
+    breaks = pretty_breaks(), labels = function(x) str_glue("{x/1e6}M")
+  ) +
+  geom_hline(lty = 2, yintercept = 0, size = .2) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = .2) +
+  geom_line() +
+  facet_wrap("MP", scales = "free", nrow = 2) +
+  theme(legend.position = "none")
+((p1 + theme(axis.title.x = element_blank())) / p2) + 
+  plot_layout(heights = c(.4, .6), guides = "collect") &
+  theme(legend.position = "none")
+ggsave("Figure2-mp-brms.png", width = 8, height = 6)
+```

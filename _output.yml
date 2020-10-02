@@ -1,0 +1,9 @@
+bookdown::gitbook:
+  highlight: kate
+  css: style.css
+  config:
+    toc:
+      collapse: section
+      before: |
+        <li><a href="./">Gaming under lockdown</a></li>
+      after: null
