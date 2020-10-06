@@ -1,7 +1,7 @@
 --- 
 title: "Gaming under lockdown: Steam data"
 author: "Matti Vuorre"
-date: "2020-10-02"
+date: "2020-10-06"
 site: bookdown::bookdown_site
 documentclass: book
 bibliography: []
@@ -14,9 +14,9 @@ description: ""
 
 We study changes in gaming behavior during COVID-19 using data from Steam.
 
-GitHub repository: <https://github.com/digital-wellbeing/steam-lockdown>
-Website: <https://digital-wellbeing.github.io/steam-lockdown>
-OSF: <https://osf.io/ya9jt/>
+- GitHub repository: <https://github.com/digital-wellbeing/steam-lockdown>
+- Website: <https://digital-wellbeing.github.io/steam-lockdown>
+- OSF: <https://osf.io/ya9jt/>
 
 ## Analyses and reproducibility
 
@@ -50,7 +50,7 @@ session_info()
 ##  collate  en_GB.UTF-8                 
 ##  ctype    en_GB.UTF-8                 
 ##  tz       Europe/London               
-##  date     2020-10-02                  
+##  date     2020-10-06                  
 ## 
 ## ─ Packages ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 ##  package     * version date       lib source                              
