@@ -3,8 +3,6 @@
 .Rproj.user
 .DS_Store
 
-data-raw/
-data/
 models/
 *index_cache/
 
