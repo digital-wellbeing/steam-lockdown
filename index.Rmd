@@ -1,39 +1,648 @@
---- 
-title: "Gaming under lockdown: Steam data"
-author: "Matti Vuorre"
+---
+title: "Changes to video game play during the COVID-19 pandemic"
+author:
+  - name: Matti Vuorre
+    url: https://vuorre.netlify.com
+    affiliation: University of Oxford
+    affiliation_url: https://www.oii.ox.ac.uk/people/matti-vuorre/
+    orcid_id: 0000-0001-5052-066X
 date: "`r Sys.Date()`"
-site: bookdown::bookdown_site
-documentclass: book
-bibliography: []
-biblio-style: apalike
-link-citations: yes
-description: ""
+repository_url: https://github.com/digital-wellbeing/steam-lockdown
+output:
+  distill::distill_article:
+    self_contained: true
+    toc: true
+    toc_depth: 3
+    code_folding: true
 ---
 
-# Preface
-
-We study changes in gaming behavior during COVID-19 using data from Steam.
-
-- GitHub repository: <https://github.com/digital-wellbeing/steam-lockdown>
-- Website: <https://digital-wellbeing.github.io/steam-lockdown>
-- OSF: <https://osf.io/ya9jt/>
-
-## Analyses and reproducibility
-
-The data analyses are organized into separate [R Markdown](https://rmarkdown.rstudio.com/) files for processing, describing, and modelling.
-
-The project is organized as a R [bookdown](https://bookdown.org/yihui/bookdown/) project, so you can reproduce all analyses by building the book (e.g. in RStudio click the "Build Book" button). The results are rendered to `docs/index.html` and can be viewed in a web browser.
-
-## Raw data
-
-Is in data-raw/ which can't yet be pushed online.
-
-## Reproducibility
-
-```{r, include = FALSE}
-# Ensure that .nojekyll exists for github pages
-dir.create('docs', F); file.create('docs/.nojekyll')
+```{r setup, include=FALSE}
+library(knitr)
+library(tidyverse)
+opts_chunk$set(echo = TRUE, message = FALSE, cache = TRUE)
+# Plotting options
+theme_set(
+  theme_linedraw() + theme(panel.grid = element_blank())
+)
+dir.create("models", FALSE)
 ```
+
+## Preface
+
+We study changes in gaming behavior during COVID-19 using data from the [Steam](https://store.steampowered.com/) gaming platform. The data were scraped from [Steam Database](https://steamdb.info/) in January 2021.
+
+The data, code, and analysis documents are available at
+
+- OSF: <https://osf.io/ya9jt/> (long term repository for code and output)
+- GitHub repository: <https://github.com/digital-wellbeing/steam-lockdown> (most up to date code)
+- Online supplement: <https://digital-wellbeing.github.io/steam-lockdown> (most up to date analysis output)
+
+The rest of this document describes the dataset, and how we cleaned and analysed it. We used the following R packages:
+
+```{r packages, echo = TRUE, code_folding = FALSE, result = 'hide'}
+library(readxl)
+library(knitr)
+library(broom)
+library(COVID19)
+library(lubridate)
+library(scales)
+library(emmeans)
+library(mgcv)
+library(patchwork)
+library(tidyverse)
+```
+
+## Data processing
+
+The data are in individual files for each of 500 titles time-series, and a separate file for the manual coding (e.g. whether a title was multiplayer or not). We loaded the time series data files into one R object, and then joined the timeseries with the manually coded table of features
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# From files in this directory
+paths <- list.files("data-raw/Top 500 Games Jan 2021/", full.names = TRUE)
+# Read these columns in these formats
+COLS <- cols_only(
+  DateTime = "T", 
+  Players = "d" 
+)
+dat <- tibble(appid = paths) %>% 
+  mutate(data = map(appid, ~read_csv(., col_types = COLS))) %>% 
+  mutate(appid = str_remove(basename(paths), ".csv")) %>% 
+  unnest(data) %>% 
+  # There is no time info in DateTime
+  rename(Date = DateTime) %>% 
+  mutate(Date = as.Date(Date))
+# Limit to 2019 and 2020
+dat <- dat %>% 
+  filter(Date >= as.Date("2019-01-01"), Date <= as.Date("2020-12-31"))
+
+# Join player counts with metadata (coding)
+titles <- read_excel(
+  "data-raw/500 Steam Games Coding FINAL.xlsx",
+  col_types = "text"
+)
+# Variable names and values (labels) needed some cleaning
+names(titles) <- c("appid", "name", "LB", "MP", "COOP")
+titles$LB <- ifelse(titles$LB == "N0", "NN", titles$LB)
+titles$LB <- ifelse(titles$LB == "Y0", "YY", titles$LB)
+titles <- titles %>% 
+  mutate(across(LB:COOP, ~factor(ifelse(.=="NN", "No", "Yes"))))
+# We focused on multiplayer vs single player
+titles <- select(titles, appid, name, MP)
+titles <- mutate(
+  titles, 
+  MP = factor(
+    MP, 
+    levels = c("Yes", "No"), 
+    labels = c("Multiplayer", "Single player")
+  )
+)
+# Join tables
+dat <- left_join(titles, dat)
+
+# Summarise to a sum per day
+dat <- dat %>% 
+  group_by(Date, MP) %>% 
+  summarise(Players = sum(Players, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(Players = Players / 1e6)
+
+# Add useful time indicators
+dat <- dat %>% 
+  mutate(
+    year = factor(year(Date)),
+    yweek = week(Date)-1,  # Week number
+    yday = yday(Date)-1,  # Day number
+    # Weekday number starting from Monday
+    wday = wday(Date, week_start = 1, label = FALSE)-1
+  )
+
+# COVID data for top 10 Steam countries
+dat_covid <- covid19(c("USA", "Russia", "Brazil", "Germany", "Canada", "France", "United Kingdom", "Poland", "Turkey"))
+# unique(dat_covid$id)
+dat_covid <- dat_covid %>% 
+  mutate(
+    Country = factor(
+      id, levels = c("USA", "RUS", "BRA", "DEU", "CAN", "FRA", "GBR", "POL", "TUR"), 
+      labels = c("United States", "Russia", "Brazil", "Germany", "Canada", "France", "United Kingdom", "Poland", "Turkey"))
+    )
+```
+
+## Data description
+
+The data were collapsed to a sum count per category (multiplayer [`r table(titles$MP)[1]` titles] vs single player [`r table(titles$MP)[2]` titles]) for each day. (The Players variable was rescaled to indicate millions; this sometimes prevents problems with model convergence.) 
+
+```{r data-prepare}
+kable(head(dat), caption = "First six rows of data", digits = 2)
+```
+
+```{r figure-data, fig.cap = "Daily players in 2019 and 2020. Vertical line indicates the March 11th, 2020, WHO announcement of a global pandemic."}
+# Date of WHO announcement
+cd <- as.Date("2020-03-11")
+# Function to format Y axis neatly
+label_fun <- function(x, n=1) str_glue("{format(round(x, n), nsmall=n)}M")
+# Use these colors throughout
+colorpal <- function(x) 
+  scale_color_brewer(
+    "Year", palette = "Dark2",
+    aesthetics = c("color", "fill")
+  )
+dat %>% 
+  ggplot(aes(Date, Players, col = year)) +
+  colorpal() +
+  geom_line(size = 1/3) +
+  geom_vline(xintercept = cd, size = 1/4) +
+  scale_y_continuous(
+    breaks = pretty_breaks(), 
+    labels = label_fun
+  ) +
+  facet_wrap("MP", nrow = 2, scales = "free_y")
+```
+
+## Modelling
+
+We modelled the daily multi- and singleplayer players from 2019 Jan 1st to end of 2020. We fit a generalized additive model of the daily player count on smooth functions of week number and weekday, and their interaction, using tensor product interactions as implemented in the R package mgcv. We also modelled different variances by year and game type because heteroskedasticity was plausible (in fact there must be vast differences between single and multiplayer). The model included separate smooths for each of the four "cells" (year: 2019 and 2020; type: multi- and single player) to allow comparisons between years and game types. 
+
+```{r models-fit, cache = FALSE}
+# We will use grouping factor G that includes the four year by game type "conditions". This allows us to do separate smooths for each cell and thus all comparisons we are interested in within the one model.
+dat <- dat %>% 
+  mutate(M = ifelse(MP=="Multiplayer", "MP", "SP")) %>% 
+  mutate(G = interaction(year, M))
+if (!file.exists("models/mgcv.rda")) {
+  fit1 <- gam(
+    list(
+      Players ~ G + ti(yweek, k = 52, by = G) + 
+        ti(wday, k = 7, by = G) + 
+        ti(yweek, wday, k = c(26, 7), by = G), 
+      ~ G
+    ),
+    family = gaulss(), method = "REML",
+    data = dat
+  )
+  fit2 <- gam(
+    list(
+      Players ~ G + ti(yweek, k = 52, by = G) + 
+        ti(wday, k = 7, by = G) + 
+        ti(yweek, wday, k = c(26, 7), by = G), 
+      ~ G + s(yweek, k = 6, by = G)
+    ),
+    family = gaulss(), method = "REML",
+    data = dat
+  )
+  save(fit1, fit2, file = "models/mgcv.rda", compress = FALSE)
+} else {load("models/mgcv.rda")}
+```
+
+```{r models-summary, eval = FALSE, include = FALSE}
+summary(fit1)
+```
+
+### Summary
+
+The model summaries themselves are somewhat difficult to interpret and not necessarily of direct interest, but are printed below. Possibly of interest are the `ti()` terms that indicate how wiggly the changes in the number of players were over time (`ti(yweek)`) over a week (`ti(wday)`), and how wiggly the interaction between those was (`ti(yweek, wday)`; i.e. the weekday by week interaction effect). `G2019.MP` = the effect for 2019 multiplayer. This "wiggliness" is reflected in the `edf` (estimated degrees of freedom) value, that indicates roughly how many parameters (we used penalized smooths) were needed to describe the smooth. Greater numbers indicate greater wiggliness.
+
+```{r model-summary}
+kable(
+  tidy(fit1, parametric = FALSE), digits = c(0,1,1,2,3),
+  caption = "Smooth terms of generalized additive model."
+)
+```
+
+### Player figure
+
+We then drew fitted lines and uncertainty intervals of the timeseries, and differences between years 2020 and 2019 over time. This allowed us to visualise the observed differences between years (hypothesized "excess play" in 2020), and model-implied uncertainties of those differences.
+
+```{r figure-predictions, fig.cap = "Top: Figure of observed (empty points) and model-implied (lines and 95%CI as shades) player counts over time for 2020 (dark) and 2019 (light gray), separately for multiplayer games (left) and single player games (right). The vertical line indicates the 2020 WHO announcement. Bottom: Weekly differences between 2020 and 2019 player counts (2020 - 2019).", layout = "l-page", fig.height = 5, fig.width = 9}
+# Create table of data and predictions
+predictions <- predict(fit2, se.fit = TRUE) %>% 
+  as.data.frame() %>% 
+  as_tibble()
+predictions <- bind_cols(dat, predictions)
+
+# Draw figure of data and predictions
+p_players <- predictions %>% 
+  # Dates from 2020 for plotting
+  group_by(yday) %>% 
+  mutate(Date = last(Date)) %>% 
+  ggplot(aes(Date, Players, col = year, group = year, fill = year)) +
+  colorpal() +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_y_continuous(
+    breaks = pretty_breaks(), labels = label_fun
+  ) +
+  scale_x_date(
+    expand = expansion(0.01), date_breaks = "1 month", date_labels = "%b"
+  ) +
+  geom_ribbon(
+    aes(ymin = fit.1-se.fit.1*1.96, ymax = fit.1+se.fit.1*1.96), 
+    alpha = .3, col = NA
+  ) +
+  geom_point(shape = 1, size = 0.85) +
+  geom_line(aes(y = fit.1), size = .15, alpha = .9) +
+  facet_wrap("MP", scales = "free", nrow = 1) +
+  theme(
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    legend.position = c(.4, .8)
+  )
+
+# "Excess play" figure
+# Observed difference between years from data
+tmp <- predictions %>% 
+  select(MP, year, yweek, Players) %>% 
+  pivot_wider(names_from = year, values_from = Players, values_fn = mean) %>% 
+  mutate(Difference = `2020`-`2019`)
+
+# Model-implied differences between years using emmeans
+# the documentation for average contrasts in ?emmeans is confusing (and possibly wrong for GAMs), so we must ensure here that results are averaged over weekdays, so that we get predictions (and differences) of weekly averages and not e.g. wednesdays
+emm <- emmeans(
+  fit2, "G", by = "yweek", at = list(yweek = 0:52),
+  cov.reduce = FALSE
+)
+# emm  # Ensure that message says averaged over wday
+# Get pairwise comparisons between cells at each week
+emmp <- pairs(emm, reverse = TRUE) %>% 
+  as.data.frame() %>% 
+  as_tibble()
+# Contrast years within MP/SP
+emmp <- emmp %>% 
+  filter(contrast %in% c("2020.MP - 2019.MP", "2020.SP - 2019.SP")) %>% 
+  mutate(
+    MP = ifelse(str_detect(contrast, "MP"), "Multiplayer", "Single player")
+  ) 
+
+# Draw figure of observed differences and model contrasts
+p_excess <- tmp %>% 
+  left_join(emmp) %>% 
+  mutate(year = "Difference (2020 - 2019)") %>% 
+  # Convert week number to approx 2020 date for plotting
+  mutate(Date = ymd("2020-01-01") + weeks(yweek-1)) %>% 
+  ggplot(aes(Date, estimate)) +
+  scale_y_continuous(
+    "Difference (2020-2019)",
+    labels = label_fun
+  ) +
+  scale_x_date(
+    expand = expansion(0.01), date_breaks = "1 month", date_labels = "%b"
+  ) +
+  geom_hline(yintercept = 0, size = .1, lty = 2) +
+  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
+  geom_point(aes(y=Difference), shape = 1, size = 1) +
+  geom_ribbon(
+    aes(ymin = (estimate-SE*2), ymax = (estimate+SE*2)),
+    alpha = .2
+  ) +
+  geom_line(size = .3) +
+  facet_wrap("MP", scales = "free") +
+  theme(
+    axis.title.x = element_blank(),
+    strip.background.x = element_blank(), 
+    strip.text.x = element_blank()
+  )
+
+# Change the layout of the panels a bit
+(p_players / p_excess) + plot_layout(heights = c(7, 3))
+```
+
+Numeric display of excess players in 2020 April
+
+```{r numbers-excess}
+dat %>% 
+  mutate(month = month(Date, label = TRUE)) %>% 
+  filter(month == "Apr") %>%
+  select(year, month, yweek, MP, Players) %>% 
+  pivot_wider(names_from = year, values_from = Players, values_fn = mean) %>% 
+  mutate(Difference = `2020`-`2019`) %>% 
+  group_by(MP) %>% 
+  filter(Difference == max(Difference, na.rm = TRUE)) %>% 
+  kable(
+    caption = "Peak weekly player counts (and difference) in April",
+    digits = 2
+  )
+```
+
+### Game type figure
+
+Figure of differences between multi- and single player games in 2019 and 2020.
+
+```{r figure-gametype, fig.cap = "Weekly difference between multiplayer and single player games."}
+tmp <- dat %>% 
+  group_by(year, yweek, MP) %>% 
+  summarise(Players = mean(Players)) %>% 
+  pivot_wider(names_from = MP, values_from = Players) %>% 
+  mutate(d = Multiplayer - `Single player`)
+# Difference in multi vs single player
+emm <- emmeans(
+  fit2, "G", by = "yweek", at = list(yweek = 0:52), 
+  cov.reduce = FALSE
+)
+emmc <- contrast(
+  emm, 
+  method = list(`2019` = c(1, 0, -1, 0), `2020` = c(0, 1, 0, -1))
+) %>% 
+  as.data.frame() %>% 
+  as_tibble() %>% 
+  rename(year = contrast) %>% 
+  left_join(tmp) %>% 
+  # Convert week number to approx 2020 date for plotting
+  mutate(Date = ymd("2020-01-01") + weeks(yweek-1))
+
+p_gametype <- emmc %>% 
+  ggplot(aes(Date, d, col = year, group = year, fill = year)) +
+  colorpal() +
+  scale_x_date(
+    expand = expansion(0.01), date_breaks = "1 month", date_labels = "%b"
+  ) +
+  geom_vline(xintercept = cd, size = .1) +
+  geom_point(shape = 1) +
+  geom_ribbon(
+    aes(ymin = (estimate-SE*2), ymax = (estimate+SE*2)),
+    alpha = .2, col = NA
+  ) +
+  geom_line(aes(y = estimate), size = .3) +
+  geom_vline(xintercept = floor(yday(cd) / 7), size = 1/4) +
+  scale_y_continuous(
+    "Difference in players\n(multi - single player)",
+    breaks = pretty_breaks(),
+    labels = label_fun
+  ) +
+  theme(
+    axis.title.x = element_blank(),
+    legend.title = element_blank(), 
+    legend.background = element_blank(),
+    legend.position = c(.85, .85),
+    plot.margin = unit(c(1, 1, 1, 1), "pt")
+  )
+
+# Figure of COVID trends
+p_covid <- dat_covid %>% 
+  filter(year(date)==2020, date <= max(emmc$Date)) %>% 
+  ggplot(aes(date, stringency_index, color = Country)) +
+  # scale_color_discrete() +
+  # Make sure the time span is same as above
+  geom_blank(data = emmc, aes(Date, estimate, color = NA)) +
+  scale_y_continuous(
+    "COVID-19\nresponse index", breaks = pretty_breaks(),
+    limits = c(0, 100)
+  ) +
+  geom_vline(xintercept = cd, size = .1) +
+  scale_x_date(
+    expand = expansion(0.01), date_breaks = "1 month", 
+    date_labels = "%b", position = "top"
+  ) +
+  geom_line() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "bottom", 
+    plot.margin = unit(c(0, 1, 1, 1), "pt")
+  )
+
+(p_gametype / p_covid) + plot_layout(heights = c(6.5, 3.5))
+```
+
+Numeric display of differences between multi- and single player counts
+
+```{r numbers-gametype}
+# Difference in February and max difference in 2020 and 2019
+dat %>% 
+  mutate(month = month(Date, label = TRUE)) %>% 
+  filter(month %in% c("Feb", "Apr")) %>%
+  select(year, month, MP, Players) %>% 
+  pivot_wider(names_from = MP, values_from = Players, values_fn = mean) %>% 
+  mutate(Difference = Multiplayer-`Single player`) %>% 
+  kable(
+    caption = "Multi- and single player counts and difference at select time points.",
+    digits = 2
+  )
+```
+
+### Weekend figure
+
+We then focused on the weekend effect. How did weekdays differ from one another, and how did that difference change over time? From this we can observe that in 2020, the weekend effect was smaller after roughly week 10 than it was in 2019.
+
+```{r weekend, fig.cap = "The weekend effect over time. Top: Observed (empty points) and model implied (lines with 95%CIs as shades) player counts over weekdays for five representative weeks (columns) separately for multi- (top) and single player games (bottom). 2019 is shown in light gray, and 2020 in dark gray. Bottom: Observed and model-implied weekly differences (weekend - weekdays) between weekdays and weekends over time.", layout = "l-page", fig.height = 6.6, fig.width = 9}
+# Create table of data and predictions
+predictions <- predict(fit2, se.fit = TRUE) %>% 
+  as.data.frame() %>% 
+  as_tibble()
+predictions <- bind_cols(dat, predictions)
+
+# Draw observed and model-implied player count for select weeks
+p_wend_1 <- left_join(dat, predictions) %>% 
+  filter(yweek %in% seq(5, 45, by = 10)) %>% 
+  ggplot(aes(wday, Players, col = year, group = year, fill = year)) +
+  colorpal() +
+  scale_y_continuous(
+    breaks = pretty_breaks(), labels = function(x) label_fun(x, 1)
+  ) +
+  scale_x_continuous(
+    "Day of week", breaks = 0:6,
+    labels = c("M", "T", "W", "T", "F", "S", "S")
+  ) +
+  geom_point(size = 1, shape = 21) +
+  geom_ribbon(
+    aes(ymin = fit.1 - se.fit.1*1.96, ymax = fit.1 + se.fit.1*1.96),
+    alpha = .2, col = NA
+  ) +
+  geom_line(aes(y = fit.1)) +
+  facet_grid(MP~yweek, scales = "free") +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank()
+  )
+
+# Observed weekday/end player count and difference from data
+tmp <- dat %>% 
+  group_by(year, yweek, MP) %>%
+  summarise(
+    wday_m = mean(Players[wday %in% 0:4]),
+    wend_m = mean(Players[wday %in% 5:6]),
+    w_eff = wend_m - wday_m
+  ) %>% 
+  ungroup() %>% 
+  drop_na(w_eff)  # Doesn't exist for week 53
+
+# Model-implied weekday player numbers
+# Note there is no weekend effect for the last week in data
+emm <- emmeans(
+  fit2, "wday", by = c("G", "yweek"), 
+  at = list(wday = 0:6, yweek = 0:52)
+)
+# Calculate model-implied average differences between weekdays and ends
+emmz <- contrast(
+  emm, infer = TRUE,
+  method = list(c(0,0,0,0,0,1,1)/2 - c(1,1,1,1,1,0,0)/5)
+) %>% 
+  as_tibble() %>% 
+  separate(G, c("year", "MP")) %>% 
+  mutate(
+    MP = ifelse(str_detect(MP, "MP"), "Multiplayer", "Single player")
+  )
+
+# Draw observed and model-implied difference between weekend and weekday
+p_wend_2 <- left_join(tmp, emmz) %>% 
+    # Convert week number to approx 2020 date for plotting
+  mutate(Date = ymd("2020-01-01") + weeks(yweek-1)) %>% 
+  ggplot(aes(Date, estimate, col = year, group = year, fill = year)) +
+  scale_color_brewer(
+    "Year", palette = "Dark2",
+    aesthetics = c("color", "fill")
+  ) +
+  scale_y_continuous(
+    "Weekend effect",
+    breaks = pretty_breaks(), labels = function(x) label_fun(x, 2)
+  ) +
+  scale_x_date(
+    expand = expansion(0.01), date_breaks = "1 month", date_labels = "%b"
+  ) +
+  geom_vline(xintercept = cd, size = .1) +
+  geom_ribbon(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    alpha = .2, col = NA
+  ) +
+  geom_line() +
+  geom_point(aes(y = w_eff), shape = 1) +
+  facet_wrap("MP", nrow = 1, strip.position = "top", scales = "free") +
+  theme(
+    legend.position = c(.9, .75), 
+    legend.title = element_blank(),
+    axis.title.x = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "pt")
+    )
+
+# Difference in weekend effect 2019-2020
+emm2 <- emmeans(
+  fit2, c("wday", "G"), by = "yweek",
+  at = list(wday = 0:6, G = unique(dat$G), yweek = 0:52)
+  )
+
+# This beast calculates the difference in weekend effect 2020-2019 for MP and SP
+emm2z <- contrast(
+  emm2, infer = TRUE,
+  method = list(
+    MP = c(
+      c(0,0,0,0,0,0,0,0,0,0,0,0,1,1, rep(0,14))/2 - 
+        c(0,0,0,0,0,0,0,1,1,1,1,1,0,0, rep(0, 14))/5
+    ) - c(
+      c(0,0,0,0,0,1,1,0,0,0,0,0,0,0, rep(0,14))/2 - 
+      c(1,1,1,1,1,0,0,0,0,0,0,0,0,0, rep(0, 14))/5
+    ),
+    SP = c(
+      c(rep(0,14), 0,0,0,0,0,0,0,0,0,0,0,0,1,1)/2 - 
+        c(rep(0,14), 0,0,0,0,0,0,0,1,1,1,1,1,0,0)/5
+    ) - c(
+      c(rep(0,14), 0,0,0,0,0,1,1,0,0,0,0,0,0,0)/2 - 
+      c(rep(0,14), 1,1,1,1,1,0,0,0,0,0,0,0,0,0)/5
+    )
+  )
+)
+emm2z <- as.data.frame(emm2z) %>% 
+  as_tibble() %>% 
+  mutate(
+    MP = ifelse(str_detect(contrast, "MP"), "Multiplayer", "Single player")
+  )
+p_wend_3 <- select(tmp, year, yweek, MP, w_eff) %>% 
+  pivot_wider(names_from = year, values_from = w_eff) %>% 
+  mutate(Difference = `2020`-`2019`) %>% 
+  left_join(emm2z) %>% 
+  # Convert week number to approx 2020 date for plotting
+  mutate(Date = ymd("2020-01-01") + weeks(yweek-1)) %>% 
+  ggplot(aes(Date, Difference)) +
+  colorpal() +
+  scale_x_date(
+    expand = expansion(0.01), date_breaks = "1 month", 
+    date_labels = "%b", position = "top"
+  ) +
+  geom_vline(xintercept = cd, size = .1) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(shape = 1) +
+  geom_ribbon(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    alpha = .2, col = NA
+  ) +
+  geom_line(aes(y = estimate), size = .3) +
+  scale_y_continuous(
+    "Difference in weekend effect",
+    breaks = pretty_breaks(),
+    labels = label_fun
+  ) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    strip.background = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "pt"),
+    strip.text = element_blank()
+  ) +
+  facet_wrap("MP", nrow = 1, scales = "free")
+
+# Put the plots together
+(p_wend_1 / p_wend_2 / p_wend_3) + 
+  plot_layout(heights = c(1/3, 1/3, 1/3))
+```
+
+Numeric display of weekend effect
+
+```{r numbers-weekend}
+dat %>% 
+  mutate(month = month(Date, label = TRUE)) %>% 
+  filter(month %in% c("Feb", "Apr")) %>%
+  group_by(year, month, yweek, MP) %>%
+  summarise(
+    wday_m = mean(Players[wday %in% 1:5]),
+    wend_m = mean(Players[wday %in% 6:7]),
+    w_eff = wend_m - wday_m
+  ) %>% 
+  ungroup() %>% 
+  drop_na(w_eff) %>% 
+  group_by(year, month, MP) %>% 
+  summarise(across(wday_m:w_eff, mean)) %>% 
+  kable(
+    caption = "Weekday effect",
+    digits = 2
+  )
+```
+
+### Additional numbers
+
+```{r numbers-more}
+dat %>% 
+  mutate(month = month(Date, label = TRUE)) %>% 
+  filter(month %in% c("Mar", "Apr", "May", "Jun")) %>% 
+  group_by(year, MP, month) %>% 
+  summarise(Players = mean(Players)) %>% 
+  summarise(min = min(Players), max = max(Players)) %>% 
+  kable(digits = 2, caption = "Ranges of players")
+
+dat %>% 
+  mutate(month = month(Date, label = TRUE)) %>% 
+  filter(month %in% c("Apr")) %>% 
+  group_by(year, MP, month) %>% 
+  summarise(max_Players = max(Players)) %>% 
+  kable(digits = 2, caption = "Peak players")
+
+dat %>% 
+  mutate(month = month(Date, label = TRUE)) %>% 
+  filter(month %in% c("Feb", "Apr")) %>% 
+  group_by(year, MP, month) %>% 
+  summarise(Players = mean(Players)) %>% 
+  summarise(min = min(Players), max = max(Players)) %>% 
+  kable(digits = 2, caption = "Ranges of players")
+```
+
+
+## Additional model checking
+
+Just checking. Apart from outliers (look at 2019 single player, quite noisy!) doing pretty well.
+
+```{r model-checking, layout = "l-page"}
+par(mfrow = c(2,2))
+gam.check(fit2)
+par(mfrow = c(1,1))
+```
+
+
+## System info {.appendix}
 
 ```{r}
 options(width = 120)
