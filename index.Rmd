@@ -243,7 +243,8 @@ p_players <- predictions %>%
   theme(
     axis.title.x = element_blank(),
     legend.title = element_blank(),
-    legend.position = c(.4, .8)
+    plot.margin = unit(c(1, 1, 1, 1), "pt"),
+    legend.position = c(.4, .85)
   )
 
 # "Excess play" figure
@@ -276,17 +277,18 @@ p_excess <- tmp %>%
   left_join(emmp) %>% 
   mutate(year = "Difference (2020 - 2019)") %>% 
   # Convert week number to approx 2020 date for plotting
-  mutate(Date = ymd("2020-01-01") + weeks(yweek-1)) %>% 
+  mutate(Date = ymd("2020-01-01") + weeks(yweek)) %>% 
   ggplot(aes(Date, estimate)) +
+  geom_vline(xintercept = cd, size = .1) +
   scale_y_continuous(
     "Difference (2020-2019)",
     labels = label_fun
   ) +
   scale_x_date(
-    expand = expansion(0.01), date_breaks = "1 month", date_labels = "%b"
+    expand = expansion(0.01), date_breaks = "1 month", 
+    date_labels = "%b", position = "top"
   ) +
   geom_hline(yintercept = 0, size = .1, lty = 2) +
-  geom_vline(xintercept = floor(yday(cd) / 7), size = .1) +
   geom_point(aes(y=Difference), shape = 1, size = 1) +
   geom_ribbon(
     aes(ymin = (estimate-SE*2), ymax = (estimate+SE*2)),
@@ -296,7 +298,9 @@ p_excess <- tmp %>%
   facet_wrap("MP", scales = "free") +
   theme(
     axis.title.x = element_blank(),
-    strip.background.x = element_blank(), 
+    axis.text.x = element_blank(),
+    strip.background.x = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "pt"),
     strip.text.x = element_blank()
   )
 
