@@ -8,6 +8,7 @@ author:
     orcid_id: 0000-0001-5052-066X
 date: "`r Sys.Date()`"
 repository_url: https://github.com/digital-wellbeing/steam-lockdown
+creative_commons: CC BY
 output:
   distill::distill_article:
     self_contained: true
