@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+title: |
+  Code supplement to "A large-scale study of changes to the quantity, quality, and distribution of video game play during a global health pandemic"
+version: 1.0.1
+license: CC-BY-4.0
+type: dataset
+abstract: |
+  Video game play has been framed as both protective factor and risk to mental health during the Coronavirus disease (COVID-19) pandemic. We conducted a statistical analysis of changes to video game play during the pandemic to better understand gaming behavior and in doing so provide an empirical foundation to the fractured discourse surrounding play and mental health. Analyses of millions of players' engagement with the 500 globally most popular games on the Steam platform indicated that the quantity of play had dramatically increased during key points of the pandemic; that those increases were more prominent for multiplayer games, suggesting that gamers were seeking out the social affordances of video game play; and that play had become more equally distributed across days of the week, suggesting increased merging of leisure activities with work and school activities. These results provide a starting point for empirically grounded discussions on video games during the pandemic, their uses, and potential effects.
+message: |
+  Please cite as indicated.
+authors:
+  - family-names: Vuorre
+    given-names: Matti
+    orcid: https://orcid.org/0000-0001-5052-066X
+    affiliation: Tilburg University
+  - family-names: Zendle
+    given-names: David
+    orcid: https://orcid.org/0000-0003-0279-6439
+    affiliation: University of York
+  - family-names: Petrovskaya
+    given-names: Elena
+    orcid: https://orcid.org/0000-0003-4276-6154
+    affiliation: University of York
+  - family-names: Ballou
+    given-names: Nick
+    orcid: https://orcid.org/0000-0003-4126-0696
+    affiliation: Queen Mary University of London
+  - family-names: Przybylski
+    given-names: Andrew
+    orcid: https://orcid.org/0000-0001-5547-2185
+    affiliation: University of Oxford
+identifiers:
+  - type: doi
+    value: 10.1037/tmb0000048
+keywords:
+  - psychology
